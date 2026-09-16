@@ -1,4 +1,4 @@
-/* phase1/main.c */
+/* \main.c */
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,7 +24,7 @@ static HANDLE open_com(const char *port, DWORD baud) {
         0,                      /* exclusive - no sharing */
         NULL,
         OPEN_EXISTING,
-        0,                      /* synchronous for phase 1 */
+        0,                      /* synchronous */
         NULL);
 
     if (h == INVALID_HANDLE_VALUE) {
@@ -97,7 +97,6 @@ int main(int argc, char **argv) {
             break;
         }
         if (got == 0) {
-            /* No data this poll - short sleep to avoid spinning */
             Sleep(10);
             continue;
         }

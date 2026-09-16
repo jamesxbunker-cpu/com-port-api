@@ -1,0 +1,13 @@
+CC     = gcc
+CFLAGS = -Wall -Wextra -O2
+LIBS   = -lkernel32
+
+all: readcom.exe
+
+readcom.exe: src/main.c
+	$(CC) $(CFLAGS) -o $@ $< $(LIBS)
+
+clean:
+	rm -f *.exe *.o
+
+.PHONY: all clean

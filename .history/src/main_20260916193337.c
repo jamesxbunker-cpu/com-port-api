@@ -1,4 +1,4 @@
-/* phase1/main.c */
+/* \main.c */
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -96,8 +96,7 @@ int main(int argc, char **argv) {
             fprintf(stderr, "ReadFile failed: %lu\n", GetLastError());
             break;
         }
-        if (got == 0) {
-            /* No data this poll - short sleep to avoid spinning */
+        if (got == 0) {a
             Sleep(10);
             continue;
         }

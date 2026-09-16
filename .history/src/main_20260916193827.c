@@ -1,4 +1,4 @@
-/* phase1/main.c */
+/* main.c */
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -97,7 +97,6 @@ int main(int argc, char **argv) {
             break;
         }
         if (got == 0) {
-            /* No data this poll - short sleep to avoid spinning */
             Sleep(10);
             continue;
         }

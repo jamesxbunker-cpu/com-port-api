@@ -1,0 +1,32 @@
+# Makefile - nmake (MSVC) syntax
+#
+# Build:
+#   From a "Developer Command Prompt for VS 2022":
+#       nmake
+#   From plain PowerShell/cmd (this file will call vcvarsall itself):
+#       nmake /F Makefile
+#
+# Clean:
+#   nmake clean
+
+VCVARS  = C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat
+
+CC      = cl
+CFLAGS  = /nologo /W4 /O2 /D_CRT_SECURE_NO_WARNINGS
+LDFLAGS = kernel32.lib
+
+com-port-api  = src
+OUT1    = $(com-port-api)\readcom.exe
+
+all: $(OUT1) $(OUT2)
+
+$(OUT1): $(com-port-api)\main.c
+	@if not exist "$(VCVARS)" ( echo ERROR: vcvarsall.bat not found at $(VCVARS) & exit /b 1 )
+	@call "$(VCVARS)" x64 >nul && cd $(com-port-api) && $(CC) $(CFLAGS) /Fe:readcom.exe main.c $(LDFLAGS)
+
+
+clean:
+	@del /Q $(com-port-api)\*.exe $(com-port-api)\*.obj 2>nul
+	@echo Cleaned.
+
+.PHONY: all clean
