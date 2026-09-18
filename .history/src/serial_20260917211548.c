@@ -118,43 +118,50 @@ void serial_close(serial_port_t *sp) {
 }
 
 int serial_read(serial_port_t *sp, void *buf, size_t len, DWORD timeout_ms) {
-    if (!sp || !buf || len == 0) {
-        return -1;
-    }
+    if (!sp || !buf || len == 0) return -1;
 
-    ResetEvent(sp->read_event); // clear event before new read command issued
+    ResetEvent(sp->read_event);
 
-    /* Previous used a fixed 10 ms Sleep. For now we just do a blocking
-     * read; MSVC's MAXDWORD interval timeout means it returns as soon as
-     * any byte is available. */
     DWORD got = 0;
     BOOL ok = ReadFile(sp->handle, buf, (DWORD)len, &got, &sp->read_ov);
 
-    if (!ok) {
-        DWORD err = GetLastError();
-        if (err != ERROR_IO_PENDING) {
-            /* Real failure, not just async-in-progress. */
-            fprintf(stderr, "ReadFile failed: %lu\n", err);
-            return -1;
-        }
-        /* Read is pending. Wait for the event, up to timeout_ms. */
+    if (ok) {
+        /* ReadFile completed synchronously. Two cases:
+         *   got > 0  -> real data, return it
+         *   got == 0 -> nothing buffered; the driver returned immediately.
+         *               Fall through and wait for the event instead of
+         *               spinning. But since there's no pending read now,
+         *               just do a short sleep-wait to avoid hammering. */
+        if (got > 0) return (int)got;
+        /* Nothing yet - wait a slice and let the caller retry. */
         DWORD w = WaitForSingleObject(sp->read_event, timeout_ms);
-        if (w == WAIT_TIMEOUT) {
-            /* Give up on this read; cancel it so the next call starts clean. */
-            CancelIo(sp->handle);
-            return 0;
-        }
-        if (w != WAIT_OBJECT_0) {
-            fprintf(stderr, "WaitForSingleObject failed: %lu\n", GetLastError());
-            return -1;
-        }
-        /* Event fired: collect the result. */
-        if (!GetOverlappedResult(sp->handle, &sp->read_ov, &got, FALSE)) {
-            DWORD e = GetLastError();
-            if (e == ERROR_OPERATION_ABORTED) return 0;   /* we cancelled it */
-            fprintf(stderr, "GetOverlappedResult failed: %lu\n", e);
-            return -1;
-        }
+        if (w == WAIT_TIMEOUT) return 0;
+        /* Event fired without a pending read? Extremely unlikely, but
+         * loop back cleanly. */
+        return 0;
+    }
+
+    /* Asynchronous path */
+    DWORD err = GetLastError();
+    if (err != ERROR_IO_PENDING) {
+        fprintf(stderr, "ReadFile failed: %lu\n", err);
+        return -1;
+    }
+
+    DWORD w = WaitForSingleObject(sp->read_event, timeout_ms);
+    if (w == WAIT_TIMEOUT) {
+        CancelIo(sp->handle);
+        return 0;
+    }
+    if (w != WAIT_OBJECT_0) {
+        fprintf(stderr, "WaitForSingleObject failed: %lu\n", GetLastError());
+        return -1;
+    }
+    if (!GetOverlappedResult(sp->handle, &sp->read_ov, &got, FALSE)) {
+        DWORD e = GetLastError();
+        if (e == ERROR_OPERATION_ABORTED) return 0;
+        fprintf(stderr, "GetOverlappedResult failed: %lu\n", e);
+        return -1;
     }
     return (int)got;
 }

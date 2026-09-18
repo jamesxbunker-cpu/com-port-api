@@ -33,7 +33,7 @@ int main(int argc, char **argv) {
         int n = serial_read(sp, buf, sizeof(buf), 100);
         if (n < 0) break;
         if (n == 0){
-            Sleep(1);
+            sleep(1);
             continue;
         } 
 
