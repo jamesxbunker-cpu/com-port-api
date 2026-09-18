@@ -44,7 +44,6 @@ serial_port_t *serial_open(const char *port, DWORD baud) {
             CloseHandle(sp->read_event);
         }
         free(sp);
-        return NULL;
     }
 
     dcb.BaudRate = baud;
@@ -69,7 +68,6 @@ serial_port_t *serial_open(const char *port, DWORD baud) {
             CloseHandle(sp->read_event);
         }
         free(sp);
-        return NULL;
     }
 
     COMMTIMEOUTS to = {0};

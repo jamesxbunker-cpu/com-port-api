@@ -36,15 +36,7 @@ serial_port_t *serial_open(const char *port, DWORD baud) {
     dcb.DCBlength = sizeof(dcb);
     if (!GetCommState(sp->handle, &dcb)) {
         fprintf(stderr, "GetCommState failed: %lu\n", GetLastError());
-        if (sp->handle && sp->handle != INVALID_HANDLE_VALUE)
-        {
-            CloseHandle(sp->handle);
-        }
-        if (sp->read_event) {
-            CloseHandle(sp->read_event);
-        }
-        free(sp);
-        return NULL;
+        goto fail;
     }
 
     dcb.BaudRate = baud;
@@ -61,15 +53,7 @@ serial_port_t *serial_open(const char *port, DWORD baud) {
 
     if (!SetCommState(sp->handle, &dcb)) {
         fprintf(stderr, "SetCommState failed: %lu\n", GetLastError());
-        if (sp->handle && sp->handle != INVALID_HANDLE_VALUE)
-        {
-            CloseHandle(sp->handle);
-        }
-        if (sp->read_event) {
-            CloseHandle(sp->read_event);
-        }
-        free(sp);
-        return NULL;
+        goto fail;
     }
 
     COMMTIMEOUTS to = {0};
