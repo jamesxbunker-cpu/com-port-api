@@ -54,7 +54,13 @@ serial_port_t *serial_open(const char *port, DWORD baud) {
     dcb.DCBlength = sizeof(dcb);
     if (!GetCommState(sp->handle, &dcb)) {
         fprintf(stderr, "GetCommState failed: %lu\n", GetLastError());
-        CloseHandle(sp->handle);
+        if (sp->handle && sp->handle != INVALID_HANDLE_VALUE)
+        {
+            CloseHandle(sp->handle);
+        }
+        if (sp->read_event) {
+            CloseHandle(sp->read_event);
+        }
         free(sp);
         return NULL;
     }
@@ -73,7 +79,13 @@ serial_port_t *serial_open(const char *port, DWORD baud) {
 
     if (!SetCommState(sp->handle, &dcb)) {
         fprintf(stderr, "SetCommState failed: %lu\n", GetLastError());
-        CloseHandle(sp->handle);
+        if (sp->handle && sp->handle != INVALID_HANDLE_VALUE)
+        {
+            CloseHandle(sp->handle);
+        }
+        if (sp->read_event) {
+            CloseHandle(sp->read_event);
+        }
         free(sp);
         return NULL;
     }
@@ -89,57 +101,36 @@ serial_port_t *serial_open(const char *port, DWORD baud) {
     SetupComm(sp->handle, 4096, 4096);
     PurgeComm(sp->handle, PURGE_RXCLEAR | PURGE_TXCLEAR);
 
-    /* Tell the driver which events we care about. */
-    if (!SetCommMask(sp->handle, EV_RXCHAR | EV_ERR | EV_BREAK)) {
-        fprintf(stderr, "SetCommMask failed: %lu\n", GetLastError());
-        CloseHandle(sp->handle);
-        free(sp);
-        return NULL;
-    }
-
     // OS signal when read event finishes
     // manual reset so only cleared after seen by program
     sp->read_event = CreateEvent(NULL, TRUE, FALSE, NULL);
     if (!sp->read_event) {
-        fprintf(stderr, "CreateEvent(read) failed: %lu\n", GetLastError());
-        CloseHandle(sp->handle);
+        fprintf(stderr, "CreateEvent failed: %lu\n", GetLastError());
+        if (sp->handle && sp->handle != INVALID_HANDLE_VALUE)
+        {
+            CloseHandle(sp->handle);
+        }
+        if (sp->read_event) {
+            CloseHandle(sp->read_event);
+        }
         free(sp);
         return NULL;
     }
-
+        
     sp->read_ov.hEvent = sp->read_event;
 
-    // comm event - fires when data arrives / break / line error
-    sp->comm_event = CreateEvent(NULL, TRUE, FALSE, NULL);
-    if (!sp->comm_event) {
-        fprintf(stderr, "CreateEvent(comm) failed: %lu\n", GetLastError());
-        CloseHandle(sp->read_event);
-        CloseHandle(sp->handle);
-        free(sp);
-        return NULL;
-    }
-
-    sp->comm_ov.hEvent = sp->comm_event;
-
     PurgeComm(sp->handle, PURGE_RXCLEAR | PURGE_TXCLEAR);
-
-    // prime the first comm-event wait
-    arm_comm_event(sp);
-
     return sp;
 }
 
 void serial_close(serial_port_t *sp) {
     if (!sp) return;
     if (sp->handle != INVALID_HANDLE_VALUE){
-        CancelIo(sp->handle); // cancel pending reads and comm wait
+        CancelIo(sp->handle); // cancel pending read
         CloseHandle(sp->handle);
     }
     if (sp->read_event){
         CloseHandle(sp->read_event);
-    }
-    if (sp->comm_event){
-        CloseHandle(sp->comm_event);
     }
     free(sp);
 }
@@ -149,63 +140,39 @@ int serial_read(serial_port_t *sp, void *buf, size_t len, DWORD timeout_ms) {
         return -1;
     }
 
-    /* 1. Wait for the driver to signal "data arrived" (or error/break).
-     *    No spin - if nothing happens within timeout_ms, return 0. */
-    DWORD w = WaitForSingleObject(sp->comm_event, timeout_ms);
-    if (w == WAIT_TIMEOUT) {
-        return 0;
-    }
-    if (w != WAIT_OBJECT_0) {
-        fprintf(stderr, "WaitForSingleObject(comm) failed: %lu\n", GetLastError());
-        return -1;
-    }
+    ResetEvent(sp->read_event); // clear event before new read command issued
 
-    /* 2. Re-arm immediately so the next byte isn't missed while we read. */
-    arm_comm_event(sp);
-
-    /* 3. Handle error / break events. */
-    if (sp->comm_mask & EV_ERR) {
-        DWORD errors = 0;
-        COMSTAT stat = {0};
-        ClearCommError(sp->handle, &errors, &stat);
-        if (errors & CE_RXOVER)   fprintf(stderr, "[serial] RX overrun\n");
-        if (errors & CE_OVERRUN)  fprintf(stderr, "[serial] overrun\n");
-        if (errors & CE_FRAME)    fprintf(stderr, "[serial] framing error\n");
-        if (errors & CE_RXPARITY) fprintf(stderr, "[serial] parity error\n");
-    }
-    if (sp->comm_mask & EV_BREAK) {
-        fprintf(stderr, "[serial] break\n");
-    }
-
-    /* 4. Data should be available now. Read it. */
-    ResetEvent(sp->read_event);
+    /* Previous used a fixed 10 ms Sleep. For now we just do a blocking
+     * read; MSVC's MAXDWORD interval timeout means it returns as soon as
+     * any byte is available. */
     DWORD got = 0;
     BOOL ok = ReadFile(sp->handle, buf, (DWORD)len, &got, &sp->read_ov);
 
-    if (ok) {
-        return (int)got;
-    }
-
-    DWORD err = GetLastError();
-    if (err != ERROR_IO_PENDING) {
-        fprintf(stderr, "ReadFile failed: %lu\n", err);
-        return -1;
-    }
-
-    w = WaitForSingleObject(sp->read_event, timeout_ms);
-    if (w == WAIT_TIMEOUT) {
-        CancelIo(sp->handle);
-        return 0;
-    }
-    if (w != WAIT_OBJECT_0) {
-        fprintf(stderr, "WaitForSingleObject(read) failed: %lu\n", GetLastError());
-        return -1;
-    }
-    if (!GetOverlappedResult(sp->handle, &sp->read_ov, &got, FALSE)) {
-        DWORD e = GetLastError();
-        if (e == ERROR_OPERATION_ABORTED) return 0;
-        fprintf(stderr, "GetOverlappedResult failed: %lu\n", e);
-        return -1;
+    if (!ok) {
+        DWORD err = GetLastError();
+        if (err != ERROR_IO_PENDING) {
+            /* Real failure, not just async-in-progress. */
+            fprintf(stderr, "ReadFile failed: %lu\n", err);
+            return -1;
+        }
+        /* Read is pending. Wait for the event, up to timeout_ms. */
+        DWORD w = WaitForSingleObject(sp->read_event, timeout_ms);
+        if (w == WAIT_TIMEOUT) {
+            /* Give up on this read; cancel it so the next call starts clean. */
+            CancelIo(sp->handle);
+            return 0;
+        }
+        if (w != WAIT_OBJECT_0) {
+            fprintf(stderr, "WaitForSingleObject failed: %lu\n", GetLastError());
+            return -1;
+        }
+        /* Event fired: collect the result. */
+        if (!GetOverlappedResult(sp->handle, &sp->read_ov, &got, FALSE)) {
+            DWORD e = GetLastError();
+            if (e == ERROR_OPERATION_ABORTED) return 0;   /* we cancelled it */
+            fprintf(stderr, "GetOverlappedResult failed: %lu\n", e);
+            return -1;
+        }
     }
     return (int)got;
 }
