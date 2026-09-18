@@ -206,7 +206,6 @@ int serial_read(serial_port_t *sp, void *buf, size_t len, DWORD timeout_ms) {
     DWORD err = GetLastError();
     if (err != ERROR_IO_PENDING) {
         fprintf(stderr, "ReadFile failed: %lu\n", err);
-        recover_errors(sp);
         return -1;
     }
 
@@ -223,7 +222,6 @@ int serial_read(serial_port_t *sp, void *buf, size_t len, DWORD timeout_ms) {
         DWORD e = GetLastError();
         if (e == ERROR_OPERATION_ABORTED) return 0;
         fprintf(stderr, "GetOverlappedResult failed: %lu\n", e);
-        recover_errors(sp);
         return -1;
     }
     return (int)got;

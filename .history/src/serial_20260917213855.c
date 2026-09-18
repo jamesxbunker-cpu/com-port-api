@@ -227,4 +227,5 @@ int serial_read(serial_port_t *sp, void *buf, size_t len, DWORD timeout_ms) {
         return -1;
     }
     return (int)got;
+    return (int)got;
 }

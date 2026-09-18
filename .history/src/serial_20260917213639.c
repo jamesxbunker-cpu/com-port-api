@@ -138,17 +138,10 @@ static void recover_errors(serial_port_t *sp) {
         fprintf(stderr, "ClearCommError failed: %lu\n", GetLastError());
         return;
     }
-    if (errors & CE_RXOVER){
-        fprintf(stderr, "[serial] RX overrun\n");
-    }
-    if (errors & CE_OVERRUN){
-        fprintf(stderr, "[serial] overrun\n");}
-    if (errors & CE_FRAME){
-        fprintf(stderr, "[serial] framing error\n");
-    }
-    if (errors & CE_RXPARITY){
-        fprintf(stderr, "[serial] parity error\n");
-    }
+    if (errors & CE_RXOVER)   fprintf(stderr, "[serial] RX overrun\n");
+    if (errors & CE_OVERRUN)  fprintf(stderr, "[serial] overrun\n");
+    if (errors & CE_FRAME)    fprintf(stderr, "[serial] framing error\n");
+    if (errors & CE_RXPARITY) fprintf(stderr, "[serial] parity error\n");
     /* CE_BREAK intentionally not logged - too noisy on virtual ports. */
 }
 
@@ -188,7 +181,13 @@ int serial_read(serial_port_t *sp, void *buf, size_t len, DWORD timeout_ms) {
 
     /* 3. Handle error / break events. */
     if (sp->comm_mask & EV_ERR) {
-        recover_errors(sp);
+        DWORD errors = 0;
+        COMSTAT stat = {0};
+        ClearCommError(sp->handle, &errors, &stat);
+        if (errors & CE_RXOVER)   fprintf(stderr, "[serial] RX overrun\n");
+        if (errors & CE_OVERRUN)  fprintf(stderr, "[serial] overrun\n");
+        if (errors & CE_FRAME)    fprintf(stderr, "[serial] framing error\n");
+        if (errors & CE_RXPARITY) fprintf(stderr, "[serial] parity error\n");
     }
     if (sp->comm_mask & EV_BREAK) {
         fprintf(stderr, "[serial] break\n");
@@ -206,7 +205,6 @@ int serial_read(serial_port_t *sp, void *buf, size_t len, DWORD timeout_ms) {
     DWORD err = GetLastError();
     if (err != ERROR_IO_PENDING) {
         fprintf(stderr, "ReadFile failed: %lu\n", err);
-        recover_errors(sp);
         return -1;
     }
 
@@ -223,7 +221,6 @@ int serial_read(serial_port_t *sp, void *buf, size_t len, DWORD timeout_ms) {
         DWORD e = GetLastError();
         if (e == ERROR_OPERATION_ABORTED) return 0;
         fprintf(stderr, "GetOverlappedResult failed: %lu\n", e);
-        recover_errors(sp);
         return -1;
     }
     return (int)got;
