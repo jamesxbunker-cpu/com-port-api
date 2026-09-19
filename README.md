@@ -2,7 +2,7 @@
 
 A C library/utility for reading from Windows COM ports using overlapped I/O and event-driven waiting.
 
-> ⚠️ **Work in Progress** — Actively being developed. Expect incomplete features and breaking changes.
+> ⚠️ **Work in Progress** - Actively being developed. Expect incomplete features and breaking changes.
 
 ## About
 
@@ -41,3 +41,16 @@ com-port-api
 make
 ./readcom.exe <COM_PORT> <BAUD>
 ```
+
+## Roadmap
+- [ ] Document the serial API surface in inc/
+- [ ] Add configurable baud rate / parity / stop bits via CLI
+- [ ] Add error handling and reconnect logic
+- [ ] Add usage examples
+- [ ] Add a test harness
+
+## Contributing
+Early-stage personal project. Feel free to open an issue with ideas or questions.
+
+## License
+TBD
