@@ -2,7 +2,7 @@ CC     = gcc
 CFLAGS = -Wall -Wextra -O2 -Iinc
 LIBS   = -lkernel32
 
-all: readcom.exe comstreamd.exe client.exe
+all: readcom.exe comstreamd.exe
 
 readcom.exe: src/main.c src/serial.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LIBS)
