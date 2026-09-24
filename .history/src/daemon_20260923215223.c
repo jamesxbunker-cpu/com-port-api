@@ -1,4 +1,4 @@
-/* src/daemon.c - serial -> ring buffer -> single pipe client */
+/* src/daemon.c - Step 3.4: serial -> ring buffer -> single pipe client */
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,17 +13,12 @@
 static serial_port_t *g_serial;
 static ringbuf_t     *g_ring;
 static volatile LONG  g_running = 1;
-static HANDLE         g_listen_pipe = INVALID_HANDLE_VALUE;
 
 /* ---- signal handler ---- */
 static BOOL WINAPI on_ctrl(DWORD type) {
     if (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT ||
         type == CTRL_CLOSE_EVENT) {
         InterlockedExchange(&g_running, 0);
-        if (g_listen_pipe != INVALID_HANDLE_VALUE) {
-            CloseHandle(g_listen_pipe);
-            g_listen_pipe = INVALID_HANDLE_VALUE;
-        }
         return TRUE;
     }
     return FALSE;
@@ -67,7 +62,6 @@ static DWORD WINAPI pipe_thread(LPVOID arg) {
     (void)arg;
 
     HANDLE pipe = create_pipe_instance();
-    g_listen_pipe = pipe;
     if (pipe == INVALID_HANDLE_VALUE) {
         fprintf(stderr, "[daemon] CreateNamedPipe failed: %lu\n", GetLastError());
         InterlockedExchange(&g_running, 0);
@@ -155,27 +149,23 @@ int main(int argc, char **argv) {
 
     fprintf(stderr, "[daemon] serial open on %s @ %lu\n", argv[1], baud);
 
+    /* Start the serial reader thread. */
     HANDLE th_serial = CreateThread(NULL, 0, serial_thread, NULL, 0, NULL);
     if (!th_serial) {
         fprintf(stderr, "CreateThread(serial) failed: %lu\n", GetLastError());
         return 1;
     }
 
-    HANDLE th_pipe = CreateThread(NULL, 0, pipe_thread, NULL, 0, NULL);
-    if (!th_pipe) {
-        fprintf(stderr, "CreateThread(pipe) failed: %lu\n", GetLastError());
-        return 1;
-    }
+    /* Run the pipe loop on the main thread. It exits when a client
+     * disconnects or Ctrl+C is pressed. */
+    pipe_thread(NULL);
 
-    /* Wait for both threads to exit. The Ctrl+C handler sets g_running=0
-     * and closes g_listen_pipe, which unblocks the pipe thread. */
-    WaitForSingleObject(th_pipe,   5000);
-    WaitForSingleObject(th_serial, 5000);
+    /* Wait for the serial thread to notice g_running==0 and exit. */
+    WaitForSingleObject(th_serial, 2000);
 
     serial_close(g_serial);
     ringbuf_destroy(g_ring);
     CloseHandle(th_serial);
-    CloseHandle(th_pipe);
 
     fprintf(stderr, "[daemon] shutdown complete\n");
     return 0;

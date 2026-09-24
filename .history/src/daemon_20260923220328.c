@@ -67,7 +67,6 @@ static DWORD WINAPI pipe_thread(LPVOID arg) {
     (void)arg;
 
     HANDLE pipe = create_pipe_instance();
-    g_listen_pipe = pipe;
     if (pipe == INVALID_HANDLE_VALUE) {
         fprintf(stderr, "[daemon] CreateNamedPipe failed: %lu\n", GetLastError());
         InterlockedExchange(&g_running, 0);

@@ -13,17 +13,12 @@
 static serial_port_t *g_serial;
 static ringbuf_t     *g_ring;
 static volatile LONG  g_running = 1;
-static HANDLE         g_listen_pipe = INVALID_HANDLE_VALUE;
 
 /* ---- signal handler ---- */
 static BOOL WINAPI on_ctrl(DWORD type) {
     if (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT ||
         type == CTRL_CLOSE_EVENT) {
         InterlockedExchange(&g_running, 0);
-        if (g_listen_pipe != INVALID_HANDLE_VALUE) {
-            CloseHandle(g_listen_pipe);
-            g_listen_pipe = INVALID_HANDLE_VALUE;
-        }
         return TRUE;
     }
     return FALSE;
@@ -67,7 +62,6 @@ static DWORD WINAPI pipe_thread(LPVOID arg) {
     (void)arg;
 
     HANDLE pipe = create_pipe_instance();
-    g_listen_pipe = pipe;
     if (pipe == INVALID_HANDLE_VALUE) {
         fprintf(stderr, "[daemon] CreateNamedPipe failed: %lu\n", GetLastError());
         InterlockedExchange(&g_running, 0);

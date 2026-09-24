@@ -13,17 +13,12 @@
 static serial_port_t *g_serial;
 static ringbuf_t     *g_ring;
 static volatile LONG  g_running = 1;
-static HANDLE         g_listen_pipe = INVALID_HANDLE_VALUE;
 
 /* ---- signal handler ---- */
 static BOOL WINAPI on_ctrl(DWORD type) {
     if (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT ||
         type == CTRL_CLOSE_EVENT) {
         InterlockedExchange(&g_running, 0);
-        if (g_listen_pipe != INVALID_HANDLE_VALUE) {
-            CloseHandle(g_listen_pipe);
-            g_listen_pipe = INVALID_HANDLE_VALUE;
-        }
         return TRUE;
     }
     return FALSE;
@@ -67,7 +62,6 @@ static DWORD WINAPI pipe_thread(LPVOID arg) {
     (void)arg;
 
     HANDLE pipe = create_pipe_instance();
-    g_listen_pipe = pipe;
     if (pipe == INVALID_HANDLE_VALUE) {
         fprintf(stderr, "[daemon] CreateNamedPipe failed: %lu\n", GetLastError());
         InterlockedExchange(&g_running, 0);
@@ -76,13 +70,48 @@ static DWORD WINAPI pipe_thread(LPVOID arg) {
 
     fprintf(stderr, "[daemon] waiting for client on %s\n", PIPE_NAME);
 
-    BOOL connected = ConnectNamedPipe(pipe, NULL);
-    if (!connected && GetLastError() != ERROR_PIPE_CONNECTED) {
-        fprintf(stderr, "[daemon] ConnectNamedPipe failed: %lu\n", GetLastError());
+    OVERLAPPED ov = {0};
+    ov.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+    if (!ov.hEvent) {
+        fprintf(stderr, "[daemon] CreateEvent failed: %lu\n", GetLastError());
         CloseHandle(pipe);
         InterlockedExchange(&g_running, 0);
         return 1;
     }
+
+    BOOL connected = ConnectNamedPipe(pipe, &ov);
+    if (!connected) {
+        DWORD err = GetLastError();
+        if (err == ERROR_IO_PENDING) {
+            while (InterlockedCompareExchange(&g_running, 1, 1)) {
+                DWORD w = WaitForSingleObject(ov.hEvent, 200);
+                if (w == WAIT_OBJECT_0) break;
+            }
+            if (!InterlockedCompareExchange(&g_running, 1, 1)) {
+                CancelIo(pipe);
+                CloseHandle(ov.hEvent);
+                CloseHandle(pipe);
+                fprintf(stderr, "[daemon] pipe thread exiting (no client ever connected)\n");
+                return 0;
+            }
+            DWORD dummy = 0;
+            if (!GetOverlappedResult(pipe, &ov, &dummy, FALSE)) {
+                DWORD e = GetLastError();
+                fprintf(stderr, "[daemon] async connect failed: %lu\n", e);
+                CloseHandle(ov.hEvent);
+                CloseHandle(pipe);
+                InterlockedExchange(&g_running, 0);
+                return 1;
+            }
+        } else if (err != ERROR_PIPE_CONNECTED) {
+            fprintf(stderr, "[daemon] ConnectNamedPipe failed: %lu\n", err);
+            CloseHandle(ov.hEvent);
+            CloseHandle(pipe);
+            InterlockedExchange(&g_running, 0);
+            return 1;
+        }
+    }
+    CloseHandle(ov.hEvent);
 
     fprintf(stderr, "[daemon] client connected\n");
 
@@ -155,27 +184,23 @@ int main(int argc, char **argv) {
 
     fprintf(stderr, "[daemon] serial open on %s @ %lu\n", argv[1], baud);
 
+    /* Start the serial reader thread. */
     HANDLE th_serial = CreateThread(NULL, 0, serial_thread, NULL, 0, NULL);
     if (!th_serial) {
         fprintf(stderr, "CreateThread(serial) failed: %lu\n", GetLastError());
         return 1;
     }
 
-    HANDLE th_pipe = CreateThread(NULL, 0, pipe_thread, NULL, 0, NULL);
-    if (!th_pipe) {
-        fprintf(stderr, "CreateThread(pipe) failed: %lu\n", GetLastError());
-        return 1;
-    }
+    /* Run the pipe loop on the main thread. It exits when a client
+     * disconnects or Ctrl+C is pressed. */
+    pipe_thread(NULL);
 
-    /* Wait for both threads to exit. The Ctrl+C handler sets g_running=0
-     * and closes g_listen_pipe, which unblocks the pipe thread. */
-    WaitForSingleObject(th_pipe,   5000);
-    WaitForSingleObject(th_serial, 5000);
+    /* Wait for the serial thread to notice g_running==0 and exit. */
+    WaitForSingleObject(th_serial, 2000);
 
     serial_close(g_serial);
     ringbuf_destroy(g_ring);
     CloseHandle(th_serial);
-    CloseHandle(th_pipe);
 
     fprintf(stderr, "[daemon] shutdown complete\n");
     return 0;
