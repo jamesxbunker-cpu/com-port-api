@@ -170,7 +170,7 @@ int main(int argc, char **argv) {
     /* Wait for both threads to exit. The Ctrl+C handler sets g_running=0
      * and closes g_listen_pipe, which unblocks the pipe thread. */
     WaitForSingleObject(th_pipe,   5000);
-    WaitForSingleObject(th_serial, INFINITE);
+    WaitForSingleObject(th_serial, 5000);
 
     serial_close(g_serial);
     ringbuf_destroy(g_ring);

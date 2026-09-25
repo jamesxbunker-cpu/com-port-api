@@ -1,4 +1,4 @@
-/* src/daemon.c - serial -> ring buffer -> single pipe client */
+/* src/daemon.c - serial -> ring buffer -> multi-client pipe server */
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -6,16 +6,17 @@
 #include "serial.h"
 #include "ringbuf.h"
 
-#define PIPE_NAME   "\\\\.\\pipe\\comstream"
-#define RING_SIZE   (1024 * 1024)   /* 1 MB of history */
+#define PIPE_NAME    "\\\\.\\pipe\\comstream"
+#define RING_SIZE    (1024 * 1024)   /* 1 MB of history */
+#define MAX_CLIENTS  64
 
-/* ---- shared state between the two threads ---- */
+/* ---- shared state ---- */
 static serial_port_t *g_serial;
 static ringbuf_t     *g_ring;
-static volatile LONG  g_running = 1;
+static volatile LONG  g_running     = 1;
 static HANDLE         g_listen_pipe = INVALID_HANDLE_VALUE;
 
-/* ---- signal handler ---- */
+/* ---- Ctrl+C handler ---- */
 static BOOL WINAPI on_ctrl(DWORD type) {
     if (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT ||
         type == CTRL_CLOSE_EVENT) {
@@ -29,7 +30,7 @@ static BOOL WINAPI on_ctrl(DWORD type) {
     return FALSE;
 }
 
-/* ---- Thread A: read from serial, push into ring ---- */
+/* ---- Serial reader thread ---- */
 static DWORD WINAPI serial_thread(LPVOID arg) {
     (void)arg;
     unsigned char buf[1024];
@@ -44,52 +45,27 @@ static DWORD WINAPI serial_thread(LPVOID arg) {
         if (n == 0) continue;
 
         ringbuf_write(g_ring, buf, (size_t)n);
-        /* Optional: log throughput. Omit to stay quiet. */
     }
     fprintf(stderr, "[daemon] serial thread exiting\n");
     return 0;
 }
 
-/* ---- Create one pipe instance in listening state ---- */
+/* ---- Create one pipe instance, ready to accept ---- */
 static HANDLE create_pipe_instance(void) {
     return CreateNamedPipeA(
         PIPE_NAME,
         PIPE_ACCESS_OUTBOUND,
         PIPE_TYPE_BYTE | PIPE_WAIT,
-        1,                          /* max instances (still 1 for 3.4) */
-        64 * 1024,                  /* out buffer */
-        0,                          /* in buffer */
+        MAX_CLIENTS,
+        64 * 1024,
+        0,
         0, NULL);
 }
 
-/* ---- Thread B: accept one client, stream from ring ---- */
-static DWORD WINAPI pipe_thread(LPVOID arg) {
-    (void)arg;
-
-    HANDLE pipe = create_pipe_instance();
-    g_listen_pipe = pipe;
-    if (pipe == INVALID_HANDLE_VALUE) {
-        fprintf(stderr, "[daemon] CreateNamedPipe failed: %lu\n", GetLastError());
-        InterlockedExchange(&g_running, 0);
-        return 1;
-    }
-
-    fprintf(stderr, "[daemon] waiting for client on %s\n", PIPE_NAME);
-
-    BOOL connected = ConnectNamedPipe(pipe, NULL);
-    if (!connected && GetLastError() != ERROR_PIPE_CONNECTED) {
-        fprintf(stderr, "[daemon] ConnectNamedPipe failed: %lu\n", GetLastError());
-        CloseHandle(pipe);
-        InterlockedExchange(&g_running, 0);
-        return 1;
-    }
-
-    fprintf(stderr, "[daemon] client connected\n");
-
-    /* This client's read cursor. Start at head so it only sees fresh bytes;
-     * change to 0 to replay the current buffer contents on connect. */
+/* ---- Per-client worker: streams ring -> this client's pipe ---- */
+static DWORD WINAPI client_thread(LPVOID arg) {
+    HANDLE pipe = (HANDLE)arg;
     size_t cursor = ringbuf_head(g_ring);
-
     unsigned char chunk[4096];
 
     while (InterlockedCompareExchange(&g_running, 1, 1)) {
@@ -99,37 +75,75 @@ static DWORD WINAPI pipe_thread(LPVOID arg) {
             fprintf(stderr, "[daemon] client fell behind, dropped bytes\n");
         }
         if (n == 0) {
-            /* Nothing available - sleep briefly. This is the one place a
-             * poll is acceptable because we're gated by client throughput
-             * and pipe writes, not by the serial driver. */
             Sleep(5);
             continue;
         }
 
-        /* Write the whole chunk to the pipe. Partial writes go to the
-         * remaining bytes; a failed write means the client went away. */
         size_t sent = 0;
+        int failed = 0;
         while (sent < n) {
             DWORD wrote = 0;
-            BOOL ok = WriteFile(pipe, chunk + sent, (DWORD)(n - sent),
-                                &wrote, NULL);
-            if (!ok) {
-                DWORD err = GetLastError();
-                fprintf(stderr, "[daemon] WriteFile failed: %lu\n", err);
-                /* Client gone. Break out and wait for another? For 3.4,
-                 * we just exit. 3.6 will loop back to accept again. */
-                InterlockedExchange(&g_running, 0);
-                goto done;
+            if (!WriteFile(pipe, chunk + sent, (DWORD)(n - sent), &wrote, NULL)) {
+                fprintf(stderr, "[daemon] client write failed: %lu\n", GetLastError());
+                failed = 1;
+                break;
             }
             sent += wrote;
         }
+        if (failed) break;
     }
 
-done:
     FlushFileBuffers(pipe);
     DisconnectNamedPipe(pipe);
     CloseHandle(pipe);
-    fprintf(stderr, "[daemon] pipe thread exiting\n");
+    fprintf(stderr, "[daemon] client thread exiting\n");
+    return 0;
+}
+
+/* ---- Accept loop ---- */
+static DWORD WINAPI accept_thread(LPVOID arg) {
+    (void)arg;
+
+    while (InterlockedCompareExchange(&g_running, 1, 1)) {
+        HANDLE pipe = create_pipe_instance();
+        if (pipe == INVALID_HANDLE_VALUE) {
+            fprintf(stderr, "[daemon] CreateNamedPipe failed: %lu\n", GetLastError());
+            InterlockedExchange(&g_running, 0);
+            return 1;
+        }
+
+        g_listen_pipe = pipe;
+        fprintf(stderr, "[daemon] waiting for client...\n");
+
+        BOOL connected = ConnectNamedPipe(pipe, NULL);
+        if (!connected && GetLastError() != ERROR_PIPE_CONNECTED) {
+            DWORD err = GetLastError();
+            if (err == ERROR_OPERATION_ABORTED || err == ERROR_INVALID_HANDLE) {
+                fprintf(stderr, "[daemon] accept thread exiting (shutdown)\n");
+                CloseHandle(pipe);
+                g_listen_pipe = INVALID_HANDLE_VALUE;
+                return 0;
+            }
+            fprintf(stderr, "[daemon] ConnectNamedPipe failed: %lu\n", err);
+            CloseHandle(pipe);
+            g_listen_pipe = INVALID_HANDLE_VALUE;
+            continue;
+        }
+
+        g_listen_pipe = INVALID_HANDLE_VALUE;
+        fprintf(stderr, "[daemon] client connected\n");
+
+        HANDLE th = CreateThread(NULL, 0, client_thread, pipe, 0, NULL);
+        if (!th) {
+            fprintf(stderr, "[daemon] CreateThread(client) failed: %lu\n", GetLastError());
+            DisconnectNamedPipe(pipe);
+            CloseHandle(pipe);
+            continue;
+        }
+        CloseHandle(th);   /* detached - thread cleans itself up */
+    }
+
+    fprintf(stderr, "[daemon] accept thread exiting\n");
     return 0;
 }
 
@@ -161,21 +175,19 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    HANDLE th_pipe = CreateThread(NULL, 0, pipe_thread, NULL, 0, NULL);
-    if (!th_pipe) {
-        fprintf(stderr, "CreateThread(pipe) failed: %lu\n", GetLastError());
+    HANDLE th_accept = CreateThread(NULL, 0, accept_thread, NULL, 0, NULL);
+    if (!th_accept) {
+        fprintf(stderr, "CreateThread(accept) failed: %lu\n", GetLastError());
         return 1;
     }
 
-    /* Wait for both threads to exit. The Ctrl+C handler sets g_running=0
-     * and closes g_listen_pipe, which unblocks the pipe thread. */
-    WaitForSingleObject(th_pipe,   5000);
-    WaitForSingleObject(th_serial, INFINITE);
+    WaitForSingleObject(th_accept, 5000);
+    WaitForSingleObject(th_serial, 2000);
 
     serial_close(g_serial);
     ringbuf_destroy(g_ring);
     CloseHandle(th_serial);
-    CloseHandle(th_pipe);
+    CloseHandle(th_accept);
 
     fprintf(stderr, "[daemon] shutdown complete\n");
     return 0;
