@@ -1,4 +1,4 @@
-/* src/daemon.c - serial -> ring buffer -> multi-client pipe server */
+/* src/daemon.c - Step 3.5: serial -> ring buffer -> multi-client pipe server */
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,9 +21,9 @@ static BOOL WINAPI on_ctrl(DWORD type) {
     if (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT ||
         type == CTRL_CLOSE_EVENT) {
         InterlockedExchange(&g_running, 0);
-        /* Cancel any pending ConnectNamedPipe so the accept thread wakes. */
         if (g_listen_pipe != INVALID_HANDLE_VALUE) {
-            CancelIoEx(g_listen_pipe, NULL);
+            CloseHandle(g_listen_pipe);
+            g_listen_pipe = INVALID_HANDLE_VALUE;
         }
         return TRUE;
     }
@@ -116,23 +116,18 @@ static DWORD WINAPI accept_thread(LPVOID arg) {
         fprintf(stderr, "[daemon] waiting for client...\n");
 
         BOOL connected = ConnectNamedPipe(pipe, NULL);
-        if (!connected) {
+        if (!connected && GetLastError() != ERROR_PIPE_CONNECTED) {
             DWORD err = GetLastError();
-            if (err == ERROR_PIPE_CONNECTED) {
-                /* Client beat us to it - proceed normally. */
-            } else if (err == ERROR_OPERATION_ABORTED ||
-                       err == ERROR_INVALID_HANDLE) {
-                /* Shutdown cancelled the pending connect. */
-                CloseHandle(pipe);
-                g_listen_pipe = INVALID_HANDLE_VALUE;
+            if (err == ERROR_OPERATION_ABORTED || err == ERROR_INVALID_HANDLE) {
                 fprintf(stderr, "[daemon] accept thread exiting (shutdown)\n");
-                return 0;
-            } else {
-                fprintf(stderr, "[daemon] ConnectNamedPipe failed: %lu\n", err);
                 CloseHandle(pipe);
                 g_listen_pipe = INVALID_HANDLE_VALUE;
-                continue;
+                return 0;
             }
+            fprintf(stderr, "[daemon] ConnectNamedPipe failed: %lu\n", err);
+            CloseHandle(pipe);
+            g_listen_pipe = INVALID_HANDLE_VALUE;
+            continue;
         }
 
         g_listen_pipe = INVALID_HANDLE_VALUE;
@@ -145,7 +140,7 @@ static DWORD WINAPI accept_thread(LPVOID arg) {
             CloseHandle(pipe);
             continue;
         }
-        CloseHandle(th);
+        CloseHandle(th);   /* detached - thread cleans itself up */
     }
 
     fprintf(stderr, "[daemon] accept thread exiting\n");
